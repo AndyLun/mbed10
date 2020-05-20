@@ -2,6 +2,35 @@
 #include "MQTTNetwork.h"
 #include "MQTTmbed.h"
 #include "MQTTClient.h"
+#include "fsl_port.h"
+#include "fsl_gpio.h"
+#define UINT14_MAX 16383
+// FXOS8700CQ I2C address
+#define FXOS8700CQ_SLAVE_ADDR0 (0x1E << 1) // with pins SA0=0, SA1=0
+#define FXOS8700CQ_SLAVE_ADDR1 (0x1D << 1) // with pins SA0=1, SA1=0
+#define FXOS8700CQ_SLAVE_ADDR2 (0x1C << 1) // with pins SA0=0, SA1=1
+#define FXOS8700CQ_SLAVE_ADDR3 (0x1F << 1) // with pins SA0=1, SA1=1
+// FXOS8700CQ internal register addresses
+#define FXOS8700Q_STATUS 0x00
+#define FXOS8700Q_OUT_X_MSB 0x01
+#define FXOS8700Q_OUT_Y_MSB 0x03
+#define FXOS8700Q_OUT_Z_MSB 0x05
+#define FXOS8700Q_M_OUT_X_MSB 0x33
+#define FXOS8700Q_M_OUT_Y_MSB 0x35
+#define FXOS8700Q_M_OUT_Z_MSB 0x37
+#define FXOS8700Q_WHOAMI 0x0D
+#define FXOS8700Q_XYZ_DATA_CFG 0x0E
+#define FXOS8700Q_CTRL_REG1 0x2A
+#define FXOS8700Q_M_CTRL_REG1 0x5B
+#define FXOS8700Q_M_CTRL_REG2 0x5C
+#define FXOS8700Q_WHOAMI_VAL 0xC7
+
+I2C i2c(PTD9, PTD8);
+int m_addr = FXOS8700CQ_SLAVE_ADDR1;
+
+void FXOS8700CQ_readRegs(int addr, uint8_t *data, int len);
+void FXOS8700CQ_writeRegs(uint8_t *data, int len);
+
 
 // GLOBAL VARIABLES
 WiFiInterface *wifi;
@@ -46,6 +75,21 @@ void publish_message(MQTT::Client<MQTTNetwork, Countdown> *client)
 	printf("Puslish message: %s\r\n", buff);
 }
 
+void publish_accel(MQTT::Client<MQTTNetwork, Countdown> *client, float x, float y, float z) {
+	MQTT::Message message;
+	char buff[100];
+	sprintf(buff, "ACC: X=%1.4f  Y=%1.4f  Z=%1.4f", x, y, z);
+	message.qos = MQTT::QOS0;
+	message.retained = false;
+	message.dup = false;
+	message.payload = (void *)buff;
+	message.payloadlen = strlen(buff) + 1;
+	int rc = client->publish(topic, message);
+
+	printf("rc:  %d\r\n", rc);
+	printf("Puslish message: %s\r\n", buff);
+}
+
 void close_mqtt()
 {
 	closed = true;
@@ -53,6 +97,21 @@ void close_mqtt()
 
 int main()
 {
+	uint8_t who_am_i, xdata[2], res[6];
+	int16_t acc16;
+	float t[3];
+
+	// Enable the FXOS8700Q
+
+	FXOS8700CQ_readRegs(FXOS8700Q_CTRL_REG1, &xdata[1], 1);
+	xdata[1] |= 0x01;
+	xdata[0] = FXOS8700Q_CTRL_REG1;
+	FXOS8700CQ_writeRegs(xdata, 2);
+
+	// Get the slave address
+	FXOS8700CQ_readRegs(FXOS8700Q_WHOAMI, &who_am_i, 1);
+
+	// Wi-Fi
 
 	wifi = WiFiInterface::get_default_instance();
 	if (!wifi)
@@ -110,6 +169,25 @@ int main()
 
 	while (1)
 	{
+		FXOS8700CQ_readRegs(FXOS8700Q_OUT_X_MSB, res, 6);
+
+		acc16 = (res[0] << 6) | (res[1] >> 2);
+		if (acc16 > UINT14_MAX / 2)
+			acc16 -= UINT14_MAX;
+		t[0] = ((float)acc16) / 4096.0f;
+
+		acc16 = (res[2] << 6) | (res[3] >> 2);
+		if (acc16 > UINT14_MAX / 2)
+			acc16 -= UINT14_MAX;
+		t[1] = ((float)acc16) / 4096.0f;
+
+		acc16 = (res[4] << 6) | (res[5] >> 2);
+		if (acc16 > UINT14_MAX / 2)
+			acc16 -= UINT14_MAX;
+		t[2] = ((float)acc16) / 4096.0f;
+
+		publish_accel(&client, t[0], t[1], t[2]);
+
 		if (closed)
 			break;
 		wait(0.5);
@@ -130,4 +208,16 @@ int main()
 	printf("Successfully closed!\n");
 
 	return 0;
+}
+
+void FXOS8700CQ_readRegs(int addr, uint8_t *adata, int len)
+{
+	char t = addr;
+	i2c.write(m_addr, &t, 1, true);
+	i2c.read(m_addr, (char *)adata, len);
+}
+
+void FXOS8700CQ_writeRegs(uint8_t *adata, int len)
+{
+	i2c.write(m_addr, (char *)adata, len);
 }
